@@ -1,0 +1,15 @@
+[package]
+name = "capri-bar"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+slint = "1.18.1"
+
+[build-dependencies]
+slint-build = "1.18.1"
+
+# Development machine is a 2007 Core 2 Duo with 2.9 GB of RAM: debug info makes
+# every build and link heavier than it is useful here.
+[profile.dev]
+debug = 0

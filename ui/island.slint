@@ -1,0 +1,19 @@
+// Capri Bar — the Dynamic Island.
+//
+// Integration 1: geometry and colour only. No interaction, no logic, no widgets.
+// The island is a black pill with rounded corners, centred at the top of the
+// screen by the window manager later (for now: whatever position the window gets).
+
+export component Island inherits Window {
+    width: 260px;
+    height: 44px;
+    background: transparent;
+    no-frame: true;
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: 22px;
+        background: #000000;
+    }
+}
