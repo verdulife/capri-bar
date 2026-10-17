@@ -1,0 +1,21 @@
+[package]
+name = "win32-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Throwaway spike for Capri Bar integration 2 (see odd/tasks/integracion-2-ventana-propia.md).
+# Its only job is to answer one question with evidence: can a window be *born*
+# ineligible for a tiling window manager such as komorebi?
+#
+# It is deliberately independent from the application crate: no dependency here
+# touches Cargo.toml, Cargo.lock or src/main.rs of capri-bar.
+
+[dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
