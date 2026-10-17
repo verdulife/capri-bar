@@ -11,9 +11,14 @@
 //! Windows wants. Windows also uses that alpha for hit testing, so later on a click
 //! outside the rounded pill will not count as a click on the island.
 //!
-//! Not handled yet: DPI changes while running, and input events. Both belong to the
-//! work that gives the island interaction; integration 2 only draws it.
+//! The size is not decided here: `ui/island.slint` is the only place where the island
+//! is defined, so the surface follows the size Slint asks for (see
+//! `IslandWindow::resize_surface` and its caller, `WindowAdapter::update_window_properties`).
+//!
+//! Not handled yet: input events, and changes of the monitor work area. Both belong to
+//! the work that gives the island interaction; integration 2 only draws it.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use slint::platform::PlatformError;
@@ -21,27 +26,21 @@ use slint::platform::software_renderer::{LineBufferProvider, PremultipliedRgbaCo
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, CreateCompatibleDC,
-    CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ,
-    MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, SelectObject, ValidateRect,
+    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
+    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetMonitorInfoW,
+    HBITMAP, HDC, HGDIOBJ, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, SelectObject,
+    ValidateRect,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
-    SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, MSG, PM_REMOVE, PeekMessageW, PostMessageW,
-    PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOW, ShowWindow, ULW_ALPHA, UpdateLayeredWindow,
-    WM_APP, WM_CLOSE, WM_DESTROY, WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos,
+    ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WM_APP, WM_CLOSE, WM_DESTROY, WM_PAINT, WNDCLASSW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
-
-/// The island's geometry, in logical pixels. This mirrors `ui/island.slint`, which
-/// stays the single place where the island is defined; it is only used to size the
-/// native window before Slint draws anything.
-const LOGICAL_WIDTH: f32 = 260.0;
-const LOGICAL_HEIGHT: f32 = 44.0;
 
 const WINDOW_CLASS: &str = "capri-bar-island-window";
 const WINDOW_TITLE: &str = "capri-bar";
@@ -49,34 +48,110 @@ const WINDOW_TITLE: &str = "capri-bar";
 /// with no timer running and still repaint the instant anything changes.
 const REDRAW_MESSAGE: u32 = WM_APP + 1;
 
+/// Side of the drawing surface created at startup, in physical pixels.
+///
+/// It is only what the window is born with: the island's real size comes from
+/// `ui/island.slint`, through `WindowAdapter::update_window_properties`, which Slint
+/// calls before the window is shown. Keeping the real size out of this file is the
+/// point -- there is one place where the island is defined, and it is not Rust.
+const PROVISIONAL_SIDE: usize = 16;
+
 /// The island window, its drawing surface and its position on screen.
 pub struct IslandWindow {
     hwnd: HWND,
+    surface: RefCell<Surface>,
+}
+
+/// The pixels Slint draws into: a top-down 32-bit DIB, premultiplied BGRA.
+struct Surface {
     memory_dc: HDC,
     bitmap: HBITMAP,
+    /// Whatever was selected in the DC before our bitmap. Windows refuses to delete a
+    /// bitmap that is still selected, so this is restored first.
+    replaced_object: HGDIOBJ,
     pixels: *mut BgraPixel,
     width: usize,
     height: usize,
-    scale_factor: f32,
+}
+
+impl Surface {
+    fn new(width: usize, height: usize) -> Result<Self, PlatformError> {
+        let mut info: BITMAPINFO = unsafe { std::mem::zeroed() };
+        info.bmiHeader = BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width as i32,
+            biHeight: -(height as i32), // top-down
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB,
+            ..unsafe { std::mem::zeroed() }
+        };
+
+        let memory_dc = unsafe { CreateCompatibleDC(std::ptr::null_mut()) };
+        if memory_dc.is_null() {
+            return Err(surface_error("CreateCompatibleDC"));
+        }
+
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let bitmap = unsafe {
+            CreateDIBSection(
+                memory_dc,
+                &info,
+                DIB_RGB_COLORS,
+                &mut bits,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if bitmap.is_null() || bits.is_null() {
+            unsafe { DeleteDC(memory_dc) };
+            return Err(surface_error("CreateDIBSection"));
+        }
+
+        let replaced_object = unsafe { SelectObject(memory_dc, bitmap as HGDIOBJ) };
+        Ok(Self {
+            memory_dc,
+            bitmap,
+            replaced_object,
+            pixels: bits as *mut BgraPixel,
+            width,
+            height,
+        })
+    }
+}
+
+impl Drop for Surface {
+    fn drop(&mut self) {
+        unsafe {
+            // Deselect first: a selected bitmap cannot be deleted.
+            SelectObject(self.memory_dc, self.replaced_object);
+            DeleteObject(self.bitmap as HGDIOBJ);
+            DeleteDC(self.memory_dc);
+        }
+    }
+}
+
+fn surface_error(what: &str) -> PlatformError {
+    PlatformError::Other(format!("{what} failed for the island drawing surface"))
 }
 
 impl IslandWindow {
-    /// Creates the island window, hidden, with the styles described in the module
-    /// documentation, and a top-down 32-bit surface for Slint to render into.
+    /// Creates the island window hidden, with the styles described in the module
+    /// documentation and a provisional drawing surface.
     pub fn create() -> Result<Rc<Self>, PlatformError> {
         // Without this the process would be DPI-virtualized and the island would be
-        // sized and positioned in virtual pixels.
-        unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        // sized and positioned in virtual pixels. It can legitimately fail if the
+        // process is already aware, so it is not fatal.
+        if unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) } == 0
+        {
+            eprintln!("capri-bar: could not set per-monitor DPI awareness; sizes may be virtualized");
+        }
 
-        let scale_factor = (unsafe { GetDpiForSystem() }) as f32 / 96.0;
-        let width = (LOGICAL_WIDTH * scale_factor).round().max(1.0) as usize;
-        let height = (LOGICAL_HEIGHT * scale_factor).round().max(1.0) as usize;
+        let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
+        let class_name = wide(WINDOW_CLASS);
+        let window_title = wide(WINDOW_TITLE);
 
-        unsafe {
-            let instance = GetModuleHandleW(std::ptr::null());
-            let class_name = wide(WINDOW_CLASS);
-            let window_title = wide(WINDOW_TITLE);
-
+        let hwnd = unsafe {
             let window_class = WNDCLASSW {
                 lpfnWndProc: Some(window_proc),
                 hInstance: instance,
@@ -91,88 +166,59 @@ impl IslandWindow {
 
             // The island never steals the focus, stays on top, keeps out of Alt+Tab,
             // and is a popup without a frame: exactly the pair komorebi needs is
-            // absent, and it never gets added later.
+            // absent, and it is never added later.
             let style = WS_POPUP;
             let ex_style = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
 
-            let hwnd = CreateWindowExW(
+            CreateWindowExW(
                 ex_style,
                 class_name.as_ptr(),
                 window_title.as_ptr(),
                 style,
                 0,
                 0,
-                width as i32,
-                height as i32,
+                PROVISIONAL_SIDE as i32,
+                PROVISIONAL_SIDE as i32,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 instance,
                 std::ptr::null(),
-            );
-            if hwnd.is_null() {
-                return Err(PlatformError::Other(
-                    "CreateWindowExW failed for the island window".into(),
-                ));
-            }
-
-            let scale_factor = GetDpiForWindow(hwnd) as f32 / 96.0;
-            let width = (LOGICAL_WIDTH * scale_factor).round().max(1.0) as usize;
-            let height = (LOGICAL_HEIGHT * scale_factor).round().max(1.0) as usize;
-
-            // A top-down 32-bit DIB: the pixels are BGRA, premultiplied, which is
-            // what UpdateLayeredWindow expects and what Slint's software renderer
-            // writes through BgraPixel.
-            let mut info: BITMAPINFO = std::mem::zeroed();
-            info.bmiHeader = BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width as i32,
-                biHeight: -(height as i32),
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB,
-                ..std::mem::zeroed()
-            };
-
-            let memory_dc = CreateCompatibleDC(std::ptr::null_mut());
-            let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-            let bitmap = CreateDIBSection(
-                memory_dc,
-                &info,
-                DIB_RGB_COLORS,
-                &mut bits,
-                std::ptr::null_mut(),
-                0,
-            );
-            if memory_dc.is_null() || bitmap.is_null() || bits.is_null() {
-                return Err(PlatformError::Other(
-                    "could not create the island drawing surface".into(),
-                ));
-            }
-            SelectObject(memory_dc, bitmap as HGDIOBJ);
-
-            let window = Rc::new(Self {
-                hwnd,
-                memory_dc,
-                bitmap,
-                pixels: bits as *mut BgraPixel,
-                width,
-                height,
-                scale_factor,
-            });
-            window.centre_at_top_of_primary_monitor();
-            Ok(window)
+            )
+        };
+        if hwnd.is_null() {
+            return Err(PlatformError::Other(
+                "CreateWindowExW failed for the island window".into(),
+            ));
         }
-    }
 
-    /// Logical-to-physical factor of the monitor the island was created on.
-    pub fn scale_factor(&self) -> f32 {
-        self.scale_factor
+        // From here on the window exists, so every failure path has to destroy it.
+        let surface = match Surface::new(PROVISIONAL_SIDE, PROVISIONAL_SIDE) {
+            Ok(surface) => surface,
+            Err(error) => {
+                unsafe { DestroyWindow(hwnd) };
+                return Err(error);
+            }
+        };
+
+        let window = Rc::new(Self {
+            hwnd,
+            surface: RefCell::new(surface),
+        });
+        window.centre_at_top_of_primary_monitor();
+        Ok(window)
     }
 
     /// The size of the drawing surface in physical pixels, which is also the size of
-    /// the window: the island does not grow by being resized.
+    /// the window: the island does not grow by being resized, it grows by being drawn,
+    /// and the surface follows what `ui/island.slint` asks for.
     pub fn physical_size(&self) -> (u32, u32) {
-        (self.width as u32, self.height as u32)
+        let surface = self.surface.borrow();
+        (surface.width as u32, surface.height as u32)
+    }
+
+    /// The monitor scale factor of the monitor the window is on.
+    pub fn scale_factor(&self) -> f32 {
+        (unsafe { GetDpiForWindow(self.hwnd) }) as f32 / 96.0
     }
 
     pub fn show(&self) {
@@ -188,27 +234,48 @@ impl IslandWindow {
         unsafe { PostMessageW(self.hwnd, REDRAW_MESSAGE, 0, 0) };
     }
 
+    /// Gives the island a drawing surface of the requested size, keeping it centred.
+    ///
+    /// Nothing happens when the size is already right, so this is cheap to call from
+    /// the places that can change it: a new size coming from `ui/island.slint`, or a
+    /// monitor scale factor that changed under us.
+    pub fn resize_surface(&self, width: usize, height: usize) -> Result<(), PlatformError> {
+        let width = width.max(1);
+        let height = height.max(1);
+        if self.physical_size() == (width as u32, height as u32) {
+            return Ok(());
+        }
+
+        let new_surface = Surface::new(width, height)?;
+        // Assigning drops the old surface, whose Drop puts its GDI objects back.
+        *self.surface.borrow_mut() = new_surface;
+        self.centre_at_top_of_primary_monitor();
+        Ok(())
+    }
+
     /// Runs `draw` with a line-by-line view over the window pixels, which is how
     /// Slint renders into a surface of ours without any intermediate copy.
     pub fn with_line_buffer<R>(&self, draw: impl FnOnce(IslandLineBuffer<'_>) -> R) -> R {
-        // SAFETY: the DIB is owned by this window and outlives it; the slice never
-        // escapes the closure, and this whole module is used from a single thread.
-        let pixels = unsafe { std::slice::from_raw_parts_mut(self.pixels, self.width * self.height) };
+        let mut surface = self.surface.borrow_mut();
+        let surface = &mut *surface;
+        // SAFETY: the DIB is owned by this surface and outlives the borrow; the slice
+        // never escapes the closure, and this whole module is used from a single thread.
+        let pixels =
+            unsafe { std::slice::from_raw_parts_mut(surface.pixels, surface.width * surface.height) };
         draw(IslandLineBuffer {
             pixels,
-            width: self.width,
+            width: surface.width,
         })
     }
 
     /// Pushes the rendered pixels to the screen, with their alpha.
     pub fn present(&self) -> Result<(), PlatformError> {
-        let mut destination = POINT {
-            x: self.window_rect().0,
-            y: self.window_rect().1,
-        };
+        let surface = self.surface.borrow();
+        let (left, top) = self.window_origin();
+        let destination = POINT { x: left, y: top };
         let size = SIZE {
-            cx: self.width as i32,
-            cy: self.height as i32,
+            cx: surface.width as i32,
+            cy: surface.height as i32,
         };
         let source = POINT { x: 0, y: 0 };
         let blend = BLENDFUNCTION {
@@ -222,9 +289,9 @@ impl IslandWindow {
             UpdateLayeredWindow(
                 self.hwnd,
                 std::ptr::null_mut(),
-                &mut destination,
+                &destination,
                 &size,
-                self.memory_dc,
+                surface.memory_dc,
                 &source,
                 0,
                 &blend,
@@ -239,16 +306,16 @@ impl IslandWindow {
         Ok(())
     }
 
-    fn window_rect(&self) -> (i32, i32) {
-        unsafe {
-            let mut rect: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
-            windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(self.hwnd, &mut rect);
-            (rect.left, rect.top)
-        }
+    fn window_origin(&self) -> (i32, i32) {
+        let mut rect: windows_sys::Win32::Foundation::RECT = unsafe { std::mem::zeroed() };
+        unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(self.hwnd, &mut rect) };
+        (rect.left, rect.top)
     }
 
-    /// Centred horizontally at the top of the primary monitor's work area.
+    /// Centred horizontally at the top of the primary monitor's work area, so the
+    /// island lands below whatever space the desktop already reserves for a bar.
     fn centre_at_top_of_primary_monitor(&self) {
+        let (width, height) = self.physical_size();
         unsafe {
             let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
             let mut info: MONITORINFO = std::mem::zeroed();
@@ -257,17 +324,16 @@ impl IslandWindow {
                 return;
             }
             let work = info.rcWork;
-            let x = work.left + ((work.right - work.left) - self.width as i32) / 2;
+            let x = work.left + ((work.right - work.left) - width as i32) / 2;
             let y = work.top;
-            windows_sys::Win32::UI::WindowsAndMessaging::SetWindowPos(
+            SetWindowPos(
                 self.hwnd,
                 std::ptr::null_mut(),
                 x,
                 y,
-                self.width as i32,
-                self.height as i32,
-                windows_sys::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE
-                    | windows_sys::Win32::UI::WindowsAndMessaging::SWP_NOZORDER,
+                width as i32,
+                height as i32,
+                SWP_NOACTIVATE | SWP_NOZORDER,
             );
         }
     }
@@ -275,11 +341,7 @@ impl IslandWindow {
 
 impl Drop for IslandWindow {
     fn drop(&mut self) {
-        unsafe {
-            DestroyWindow(self.hwnd);
-            DeleteObject(self.bitmap as HGDIOBJ);
-            DeleteDC(self.memory_dc);
-        }
+        unsafe { DestroyWindow(self.hwnd) };
     }
 }
 

@@ -34,10 +34,11 @@ esquina fuera del radio transparente, radio medido **22 px**.
 | T1 | S1, S2, S6 | Spike aislado: ventana Win32 creada con estilo propio (sin `WS_CAPTION` ni `WS_EX_WINDOWEDGE`) y comprobación de que komorebi la ignora desde el nacimiento — **verificado**, ver L5 | inline | — |
 | T2 | S1–S5 | Portar la plataforma al crate real: dependencias, módulo de plataforma y `src/main.rs` — **verificado**, ver L6 | inline | — |
 | T3 | S3, S5 | Verificación de la isla: cuatro medidas del render headless, medida en pantalla y build sin errores ni avisos — **verificado**, ver L6 | inline | — |
+| T4 | S1, S5 | Retoque tras la verificación independiente: el tamaño deja de estar duplicado en Rust y sale del `.slint`, se atiende un cambio de escala, se arreglan los tiempos de vida de GDI, un fallo de presentación deja de tumbar la isla y clippy queda limpio — **verificado**, ver L7 | inline | — |
 
 T2 y T3 no se abren hasta que T1 esté verificado: son las que tocan el código de la aplicación.
 
-**Estado:** T1, T2 y T3 verificadas. La isla ya vive en una ventana propia que nace fuera del tiling. Nada commiteado (decisión del usuario, S7).
+**Estado:** T1–T4 verificadas. La isla vive en una ventana propia que nace fuera del tiling, y su tamaño lo decide `ui/island.slint` y nadie más. Nada commiteado (decisión del usuario, S7).
 
 ## Log
 
@@ -128,3 +129,40 @@ T3 (sin regresión del render headless, mismos tres métodos que la integración
   `git diff -- ui/island.slint` vacío: el fichero sigue intacto (S3)
 ```
 
+**L7** (verificación del retoque T4, tras el informe del verificador independiente):
+
+```
+build: 0 errores, 0 avisos       clippy --all-targets: 0 avisos, 0 errores
+
+El tamano ya no vive en Rust. La ventana se crea con una superficie provisional de 16x16
+que no llega a verse: Slint llama a `update_window_properties` antes de mostrarla, el
+adapter lee `layout_constraints().preferred` y redimensiona ventana y superficie.
+
+Prueba de que el .slint manda, en los dos sentidos:
+  .slint 260x44  ->  ventana 260x44 en L830 T40 (x esperado 830)
+  .slint 300x60  ->  ventana 300x60 en L810 T40 (x esperado 810)
+  .slint restaurado (git diff vacio) -> ventana 260x44 otra vez
+
+Estilos, sin cambio: STYLE 0x94000000 (WS_CAPTION no), EXSTYLE 0x08080088
+  (WS_EX_WINDOWEDGE no; LAYERED + TOOLWINDOW + TOPMOST + NOACTIVATE si)
+
+komorebi: island-test.exe ausente de `komorebic state` y de `visible-windows`
+  (binario renombrado a proposito, para que la regla efimera no enmascare el resultado)
+
+Consumo en reposo (isla quieta, 8 s, 8 procesadores logicos):
+  CPU: 0,0000 s  ->  0,000 % de un nucleo  ->  0,0000 % de la maquina
+  memoria de trabajo: 15,1 MB
+  (el "en reposo no se nota" del manifiesto, ahora con numero)
+
+Captura retenida como evidencia: target/verify/captura-retoque.png (276x60)
+  zona negra 260x44 en (8,8), centro (0,0,0), y cada esquina igual al pixel inmediatamente exterior
+```
+
+Arreglado en T4: F3 (los objetos GDI de la superficie se restauran antes de borrarse, y todo camino de fallo
+después de `CreateWindowExW` destruye la ventana), F2 (un frame que no se puede presentar se reporta una vez y
+el bucle sigue), F5 (clippy limpio) y F4 (README: la integración 2 usa Win32, el crate compila solo en Windows, y
+la verificación headless con `slint-viewer` sigue disponible en Linux).
+
+**F1b (cambio de escala del monitor) queda implementado pero no ejercitado**: la comprobación está en el bucle
+(compara `GetDpiForWindow` con el factor guardado y reemite `ScaleFactorChanged`), pero probarlo de verdad exige
+cambiar la escala de pantalla en Windows, que es una acción del usuario.
