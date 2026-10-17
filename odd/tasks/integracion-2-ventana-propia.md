@@ -18,8 +18,8 @@ objetivo de la v1), y la app no debe depender de la configuración de komorebi d
 **S4.** Todo lo de Slint por encima de la capa de ventana se conserva: estilo declarativo, animaciones, callbacks y estado.
 > "estaria bien saber si una vez creada la ventana podemos seguir usando slint para estilizarla y o darle funcionalidad, animaciones etc."
 
-**S5.** Criterio de medida de la isla, el mismo de la integración 1: **260 × 44 px**, píxel central `#000000` opaco,
-esquina fuera del radio transparente, radio medido **22 px**.
+**S5.** Criterio de medida de la isla: **200 × 36 px**, píxel central `#000000` opaco, esquina fuera del radio
+   transparente, radio medido **18 px**. (Reescrita por L8; antes era 260 × 44 con radio 22.)
 
 **S6.** Proceso: documento de tareas y spike aislado antes de tocar `src/main.rs`.
 > "empezamos por el principio: documento, tareas y spike antes de tocar `src/main.rs`" (acordado con el usuario; aceptado con "ok dale")
@@ -35,6 +35,7 @@ esquina fuera del radio transparente, radio medido **22 px**.
 | T2 | S1–S5 | Portar la plataforma al crate real: dependencias, módulo de plataforma y `src/main.rs` — **verificado**, ver L6 | inline | — |
 | T3 | S3, S5 | Verificación de la isla: cuatro medidas del render headless, medida en pantalla y build sin errores ni avisos — **verificado**, ver L6 | inline | — |
 | T4 | S1, S5 | Retoque tras la verificación independiente: el tamaño deja de estar duplicado en Rust y sale del `.slint`, se atiende un cambio de escala, se arreglan los tiempos de vida de GDI, un fallo de presentación deja de tumbar la isla y clippy queda limpio — **verificado**, ver L7 | inline | — |
+| T5 | S5 | Cambio de requisito (L8): el tamaño de reposo pasa a 200 × 36 con radio 18, en el `.slint` y en los dos documentos que fijan el criterio | inline | — |
 
 T2 y T3 no se abren hasta que T1 esté verificado: son las que tocan el código de la aplicación.
 
@@ -166,3 +167,36 @@ la verificación headless con `slint-viewer` sigue disponible en Linux).
 **F1b (cambio de escala del monitor) queda implementado pero no ejercitado**: la comprobación está en el bucle
 (compara `GetDpiForWindow` con el factor guardado y reemite `ScaleFactorChanged`), pero probarlo de verdad exige
 cambiar la escala de pantalla en Windows, que es una acción del usuario.
+
+**L8** (cambio de requisito, verbatim del usuario):
+
+> "olvidemonos de hacer pruebas de dpi. quitamos el rdd de este proyecto (mas adelante ya revisaremos ahora nos interesa abanzar rapido con el poc). creo que el tamaño de la isla ahora es demasiado grande. ajustamos el tamaño o nos ponemos ya con el siguiente paso?"
+
+Decisiones de este mensaje:
+
+- El tamaño de reposo pasa de 260 × 44 (radio 22) a **200 × 36 (radio 18)**, elegido por el usuario entre tres
+  propuestas. **S5 queda reescrita** y el criterio del README, actualizado. No se afina más por ahora: el estado
+  ampliado (integración 3) fijará juntos el tamaño de reposo y el de expansión.
+- Las pruebas de cambio de escala de pantalla se **descartan** (T4/R2). El código sigue implementado; simplemente no
+  se ejercita.
+- **RDD queda desactivado solo para este clon** (`gentle-ai review mode disable --scope clone`), con el ajuste global
+  intacto, para avanzar rápido con la prueba de concepto. Reversible con `enable --scope clone`.
+
+**L9** (verificación del cambio de tamaño, T5, y hallazgo sobre el artefacto de build):
+
+```
+render headless con el mismo .slint: 200x36 | centro (0,0,0,255) | esquinas (0,0,0,0)
+                                     radio 18,04 / 17,94 / 17,68 px (objetivo 18)
+pantalla: ventana 200x36 en L860 T40 (x esperado 860, medido 860)
+          STYLE 0x94000000 sin WS_CAPTION | EXSTYLE sin WS_EX_WINDOWEDGE
+captura: captura-200x36.png (216x52): zona negra 200x36 en (8,8), centro negro,
+         y las cuatro esquinas iguales al píxel inmediatamente exterior
+komorebi: island-test.exe ausente de `komorebic state` (que sí gestionaba WindowsTerminal y zen.exe)
+```
+
+Hallazgo que hay que recordar: el primer `cargo build` después de editar `ui/island.slint` **no** aplicó el cambio
+(la ventana seguía midiendo 260x44) y solo se corrigió con `cargo clean -p capri-bar` y volver a compilar. Tras esa
+limpieza, editar el `.slint` y compilar funciona sin más, comprobado dos veces (200x36 y 210x38). El build script sí
+declara `cargo:rerun-if-changed=…ui/island.slint`, así que la explicación más probable es un artefacto viejo de mezclar
+`cargo clippy --all-targets` con `cargo build` en el mismo `target/` (había dos directorios de salida del build script,
+uno con el tamaño viejo). Si vuelve a pasar: `cargo clean -p capri-bar`.

@@ -36,14 +36,14 @@ Usa el visor **precompilado** de la release, no lo compiles con `cargo install s
 SLINT_SCALE_FACTOR=1 slint-viewer --screenshot isla.png ui/island.slint
 ```
 
-Criterio de la integración 1, medible sobre esa imagen:
+Criterio de la isla, medible sobre esa imagen:
 
 | Comprobación | Valor esperado |
 |---|---|
-| Tamaño | **260 × 44 px** |
+| Tamaño | **200 × 36 px** |
 | Píxel central | **#000000** opaco |
 | Esquina fuera del radio | **transparente** |
-| Radio medido | **22 px** |
+| Radio medido | **18 px** |
 
 ## Estructura
 
