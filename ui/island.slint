@@ -1,8 +1,14 @@
-// Capri Bar — the Dynamic Island.
+// Capri Bar — the island.
 //
-// Integration 1: geometry and colour only. No interaction, no logic, no widgets.
-// The island is a black pill with rounded corners, centred at the top of the
-// screen by the window manager later (for now: whatever position the window gets).
+// Integration 3: the pill now shows the first widget, the clock, so this file is no longer
+// "geometry and colour only" (integration 1) and that is deliberate. The widget lives in
+// ui/widgets/ and takes the hour as data instead of reading it itself.
+//
+// The window around this drawing is created and placed by the app, not by the window manager:
+// it is born without a frame and without the style pair a tiling window manager claims, and it
+// is centred at the top of the primary monitor's work area.
+
+import { Clock } from "widgets/clock.slint";
 
 export component Island inherits Window {
     width: 200px;
@@ -10,10 +16,19 @@ export component Island inherits Window {
     background: transparent;
     no-frame: true;
 
+    // The hour the clock shows. Rust sets it.
+    in property <string> time: "00:00";
+
     Rectangle {
         width: parent.width;
         height: parent.height;
         border-radius: 18px;
         background: #000000;
+
+        Clock {
+            time: root.time;
+            width: parent.width;
+            height: parent.height;
+        }
     }
 }

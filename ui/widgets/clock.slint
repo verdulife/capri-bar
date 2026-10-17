@@ -1,0 +1,15 @@
+// Capri Bar — the first widget: the clock.
+//
+// A widget declares the data it needs and does not go looking for it: the hour arrives as a
+// property, put there by Rust. The default value exists only so the island can be rendered on
+// its own, without the app, which is how its drawing is verified.
+
+export component Clock inherits Text {
+    in property <string> time: "00:00";
+
+    text: time;
+    font-size: 16px;
+    color: #ffffff;
+    horizontal-alignment: center;
+    vertical-alignment: center;
+}

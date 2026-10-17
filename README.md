@@ -10,6 +10,8 @@ La idea completa —qué es, qué no es y con qué reglas se construye— está 
 
 **Integración 2**: la isla vive en una **ventana propia**, creada por el proceso, que **nace sin `WS_CAPTION` ni `WS_EX_WINDOWEDGE`** — es decir, fuera del tiling de komorebi, que solo reclama ventanas con ese par de estilos — con alfa por píxel, siempre encima, sin robar el foco y fuera del Alt+Tab. Se coloca centrada arriba en el área de trabajo del monitor principal. Sigue sin interacción. En Windows eso implica además que **este crate solo compila en Windows** (ver Requisitos).
 
+**Integración 3**: en reposo la isla enseña el primer widget, **el reloj**: `HH:MM`, actualizado al cambiar el minuto. El widget vive en `ui/widgets/clock.slint` y **recibe la hora como dato**, no la lee por su cuenta; los datos los pone `src/clock.rs`. La isla solo se despierta cuando cambia lo que muestra. Todavía sin interacción.
+
 ## Requisitos
 
 - **Rust 1.92 o superior.** Slint no compila con versiones anteriores. En esta máquina: 1.99.1.
@@ -41,16 +43,21 @@ Criterio de la isla, medible sobre esa imagen:
 | Comprobación | Valor esperado |
 |---|---|
 | Tamaño | **200 × 36 px** |
-| Píxel central | **#000000** opaco |
+| Fondo de la píldora | **#000000** opaco, medido en un punto fuera del texto |
+| Texto del reloj | **hay tinta** dentro de la píldora |
 | Esquina fuera del radio | **transparente** |
 | Radio medido | **18 px** |
+
+El centro de la píldora ya no sirve para comprobar el fondo: con el reloj centrado, ese píxel puede caer dentro de una letra o entre dos.
 
 ## Estructura
 
 | Ruta | Qué es |
 |---|---|
-| `ui/island.slint` | La isla: geometría y color. Es también la única fuente del tamaño de la ventana |
-| `src/main.rs` | Instala la plataforma y abre la isla |
+| `ui/island.slint` | La isla: geometría, color y el widget en escena. Es también la única fuente del tamaño de la ventana |
+| `ui/widgets/clock.slint` | El primer widget: el reloj, con la hora como dato de entrada |
+| `src/main.rs` | Instala la plataforma, pone la hora y arma el reloj |
+| `src/clock.rs` | De dónde sale la hora y cuándo hay que despertar la isla |
 | `src/island_window.rs` | La ventana Win32: estilos, superficie de dibujo y alfa por píxel |
 | `src/island_platform.rs` | La plataforma de Slint: bucle de eventos y puente con la ventana |
 | `build.rs` | Compila el `.slint` durante el build (sin intérprete en runtime) |
